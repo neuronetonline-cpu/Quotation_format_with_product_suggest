@@ -1,15 +1,13 @@
-name: Build Bluetech Quotation App
+name: Build Windows EXE
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+  push:
+    branches: [ main ]
 
 jobs:
-  build-windows:
+  build:
     runs-on: windows-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
