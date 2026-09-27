@@ -262,6 +262,7 @@ class App:
         self._product_popup = None
         self._product_popup_entry = None
         self._product_popup_items = []
+        self.root.bind("<Button-1>", self._product_root_click, add="+")
         self.build()
 
     def build(self):
@@ -707,7 +708,6 @@ class App:
                 e.bind("<Down>", lambda event, widget=e: self._product_popup_key(event, widget) or self._move_table_arrow_focus(widget, 1), add="+")
                 e.bind("<Return>", lambda event, widget=e: self._product_popup_key(event, widget) or "break", add="+")
                 e.bind("<Escape>", lambda event: self.hide_product_suggestions(), add="+")
-                e.bind("<FocusOut>", lambda event: self.root.after(150, self.hide_product_suggestions))
             elif j == 2:
                 # DESCRIPTION is always shown in CAPITAL letters.
                 e.bind("<KeyRelease>", lambda event, var=d, widget=e: self._description_keyrelease(var, widget))
@@ -2017,6 +2017,11 @@ class App:
         y = entry.winfo_rooty() + entry.winfo_height()
         width = max(entry.winfo_width(), 360)
         popup.geometry(f"{width}x{min(300, 28 * len(matches) + 4)}+{x}+{y}")
+        try:
+            popup.wm_attributes("-topmost", True)
+        except Exception:
+            pass
+        popup.lift()
         lb = tk.Listbox(
             popup, activestyle="none", selectmode="browse", height=min(10, len(matches)),
             font=("Segoe UI", 9), bg="#FFFFFF", fg="#17324D",
@@ -2032,6 +2037,28 @@ class App:
         lb.bind("<Return>", lambda e: self._choose_product_suggestion(entry, lb.curselection()[0] if lb.curselection() else 0))
         lb.bind("<Escape>", lambda e: self.hide_product_suggestions())
         popup.bind("<Escape>", lambda e: self.hide_product_suggestions())
+
+    def _product_root_click(self, event):
+        """Hide autocomplete when clicking outside the active product entry/popup."""
+        popup = self._product_popup
+        entry = self._product_popup_entry
+        if popup is None or entry is None:
+            return
+        try:
+            widget = self.root.winfo_containing(event.x_root, event.y_root)
+            if widget is entry:
+                return
+            w = widget
+            while w is not None:
+                if w is popup:
+                    return
+                try:
+                    w = w.master
+                except Exception:
+                    break
+        except Exception:
+            pass
+        self.hide_product_suggestions()
 
     def hide_product_suggestions(self):
         if self._product_popup is not None:
