@@ -706,7 +706,7 @@ class App:
                 e.bind("<KeyRelease>", lambda event, var=p, widget=e: self._product_keyrelease(var, widget))
             elif j == 2:
                 # DESCRIPTION is the actual stock/product name from the Excel master.
-                e.bind("<KeyRelease>", lambda event, var=d, widget=e: self._description_keyrelease(var, widget))
+                e.bind("<KeyRelease>", lambda event, var=d, widget=e: self._description_keyrelease(var, widget, event))
                 # When suggestions are open, Up/Down/Enter are handled by the popup.
                 # Otherwise they keep the normal table navigation behaviour.
                 e.bind("<Up>", lambda event, widget=e: self._description_popup_navigation(event, widget), add="+")
@@ -768,7 +768,12 @@ class App:
         widget.configure(font=("Segoe UI", 9, "bold") if qty > 1 else ("Segoe UI", 9))
         self.recalc()
 
-    def _description_keyrelease(self, var, widget):
+    def _description_keyrelease(self, var, widget, event=None):
+        # Arrow/Enter/Escape are handled by the autocomplete navigation bindings.
+        # Do not rebuild the popup on their KeyRelease event, otherwise the
+        # selected row is reset to the first suggestion immediately.
+        if event is not None and event.keysym in ("Up", "Down", "Return", "Escape"):
+            return
         value = var.get()
         upper = value.upper()
         if value != upper:
@@ -836,7 +841,15 @@ class App:
         return "break"
 
     def _move_table_arrow_focus(self, widget, direction):
-        """Move Up/Down focus to the same editable column in the adjacent row."""
+        """Move Up/Down focus to the same editable column in the adjacent row.
+
+        If the stock autocomplete popup is open for this widget, do not consume
+        the arrow event here; the autocomplete handler registered later on the
+        widget must receive it and move inside the suggestion list instead.
+        """
+        if (self._product_popup is not None
+                and self._product_popup_entry is widget):
+            return None
         for idx, row in enumerate(self.rows):
             if widget in row[4]:
                 col = row[4].index(widget)
