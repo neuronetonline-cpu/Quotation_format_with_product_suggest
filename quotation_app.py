@@ -1847,7 +1847,7 @@ class App:
                         drop_whitespace=True,
                     )
                     lines.extend(wrapped or [""])
-                line("BLUETECH COMPUTERS"); line("COMPUTER SALES | REPAIRS | UPGRADES")
+                line("COMPUTER SALES | REPAIRS | UPGRADES")
                 line("230, 1st Floor, Lakyanya Plaza, Highlevel Road, Maharagama"); line("077 633 7942 / 074 394 6233"); line("="*80)
                 line(f"INVOICE NO : {invoice_no.get()}    DATE : {invoice_date.get()}"); line(f"SOLD BY    : {self.prepared_by.get()}"); line(""); line(f"CUSTOMER   : {customer.get()[:65]}") ; line(f"PHONE      : {phone.get()[:65]}")
                 if invoice_title.get().strip(): line(f"TITLE      : {invoice_title.get()[:65]}")
@@ -1866,11 +1866,24 @@ class App:
                 line("WARRANTY CONDITIONS")
                 for part in get_setting("invoice_warranty_conditions","").replace("\\n","\n").splitlines(): line(part)
                 line("Thank you for your business!")
-                data="\r\n".join(lines)+"\r\n\f"
+                # Epson ESC/P printer formatting. RAW mode does not understand
+                # ReportLab/PDF point sizes, so explicitly enlarge the Bluetech
+                # heading at the printer. This gives the requested large heading
+                # on the dot-matrix printer instead of falling back to normal size.
+                ESC = b"\x1b"
+                data = bytearray()
+                data += ESC + b"@"       # initialize printer
+                data += ESC + b"M"       # 12 cpi
+                data += ESC + b"E"       # bold on
+                data += ESC + b"W1"      # double width
+                data += ESC + b"w1"      # double height
+                data += b"BLUETECH COMPUTERS\r\n"
+                data += ESC + b"w0" + ESC + b"W0" + ESC + b"F"
+                data += ("\r\n".join(lines) + "\r\n\f").encode("cp437", errors="replace")
                 try:
                     h=win32print.OpenPrinter(pv.get())
                     try:
-                        win32print.StartDocPrinter(h,1,(invoice_no.get(),None,"RAW")); win32print.StartPagePrinter(h); win32print.WritePrinter(h,data.encode("cp437",errors="replace")); win32print.EndPagePrinter(h); win32print.EndDocPrinter(h)
+                        win32print.StartDocPrinter(h,1,(invoice_no.get(),None,"RAW")); win32print.StartPagePrinter(h); win32print.WritePrinter(h,bytes(data)); win32print.EndPagePrinter(h); win32print.EndDocPrinter(h)
                     finally: win32print.ClosePrinter(h)
                     messagebox.showinfo("Invoice",f"Invoice sent to {pv.get()}.",parent=pw); pw.destroy()
                 except Exception as e: messagebox.showerror("Printer",f"Could not print invoice:\n{e}",parent=pw)
