@@ -707,19 +707,19 @@ class App:
             elif j == 2:
                 # DESCRIPTION is the actual stock/product name from the Excel master.
                 e.bind("<KeyRelease>", lambda event, var=d, widget=e: self._description_keyrelease(var, widget))
-                e.bind("<Up>", lambda event, widget=e: self._product_popup_key(event, widget) or self._move_table_arrow_focus(widget, -1), add="+")
-                e.bind("<Down>", lambda event, widget=e: self._product_popup_key(event, widget) or self._move_table_arrow_focus(widget, 1), add="+")
-                e.bind("<Return>", lambda event, widget=e: self._product_popup_key(event, widget) or self.focus_next_or_cost(widget, 1, 3), add="+")
-                e.bind("<Escape>", lambda event: self.hide_product_suggestions(), add="+")
+                # When suggestions are open, Up/Down/Enter are handled by the popup.
+                # Otherwise they keep the normal table navigation behaviour.
+                e.bind("<Up>", lambda event, widget=e: self._description_popup_navigation(event, widget), add="+")
+                e.bind("<Down>", lambda event, widget=e: self._description_popup_navigation(event, widget), add="+")
+                e.bind("<Return>", lambda event, widget=e: self._description_popup_return(event, widget), add="+")
+                e.bind("<Escape>", lambda event: self._description_popup_escape(event), add="+")
             elif j == 3:
                 # Quantity greater than 1 is visually emphasized.
                 e.bind("<KeyRelease>", lambda event, var=q, widget=e: self._qty_keyrelease(var, widget))
             elif j == 4:
                 # Recalculate immediately while COST is being entered.
                 e.bind("<KeyRelease>", lambda event: self.recalc())
-            if j == 2:
-                e.bind("<Return>", lambda event, widget=e: self.focus_next_or_cost(widget, 1, 3))
-            elif j == 3:
+            if j == 3:
                 # QTY -> same field in next row; last QTY -> Requested Profit
                 e.bind("<Return>", lambda event, widget=e: self.focus_next_or_profit(widget, 2))
             elif j == 4:
@@ -2013,35 +2013,55 @@ class App:
             return
         self._product_popup_entry = entry
         self._product_popup_items = matches
+
         popup = tk.Toplevel(self.root)
         self._product_popup = popup
         popup.overrideredirect(True)
-        popup.transient(self.root)
         popup.configure(bg="#B9D7EF")
+        # Do not make the suggestion window topmost/transient. Keeping keyboard
+        # focus in the Entry makes Up/Down/Enter immediate and avoids the short
+        # focus delay that occurred after selecting a suggestion with the mouse.
+        try:
+            popup.wm_attributes("-topmost", False)
+        except Exception:
+            pass
+
         x = entry.winfo_rootx()
         y = entry.winfo_rooty() + entry.winfo_height()
         width = max(entry.winfo_width(), 360)
-        popup.geometry(f"{width}x{min(300, 28 * len(matches) + 4)}+{x}+{y}")
-        try:
-            popup.wm_attributes("-topmost", True)
-        except Exception:
-            pass
-        popup.lift()
+        height = min(300, 28 * len(matches) + 4)
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+
         lb = tk.Listbox(
-            popup, activestyle="none", selectmode="browse", height=min(10, len(matches)),
-            font=("Segoe UI", 9), bg="#FFFFFF", fg="#17324D",
-            selectbackground="#0878D1", selectforeground="#FFFFFF",
-            relief="solid", bd=1, highlightthickness=0
+            popup,
+            activestyle="none",
+            selectmode="browse",
+            height=min(10, len(matches)),
+            font=("Segoe UI", 9),
+            bg="#FFFFFF",
+            fg="#17324D",
+            selectbackground="#0878D1",
+            selectforeground="#FFFFFF",
+            relief="solid",
+            bd=1,
+            highlightthickness=0,
+            takefocus=0,
         )
         lb.pack(fill="both", expand=True, padx=1, pady=1)
         for product, cost, _ in matches:
             lb.insert("end", f"{product}    |    Cost: LKR {float(cost or 0):,.2f}")
         lb.selection_set(0)
         lb.activate(0)
-        lb.bind("<ButtonRelease-1>", lambda e: self._choose_product_suggestion(entry, lb.curselection()[0] if lb.curselection() else 0))
-        lb.bind("<Return>", lambda e: self._choose_product_suggestion(entry, lb.curselection()[0] if lb.curselection() else 0))
+        lb.bind("<ButtonRelease-1>", lambda e: self._choose_product_suggestion(
+            entry, lb.curselection()[0] if lb.curselection() else 0
+        ))
         lb.bind("<Escape>", lambda e: self.hide_product_suggestions())
         popup.bind("<Escape>", lambda e: self.hide_product_suggestions())
+        popup.update_idletasks()
+        # Explicitly return focus to the description Entry after the popup is
+        # created; the popup itself never becomes the keyboard target.
+        entry.focus_set()
+        entry.icursor(tk.END)
 
     def _product_root_click(self, event):
         """Hide autocomplete when clicking outside the active product entry/popup."""
@@ -2066,34 +2086,41 @@ class App:
         self.hide_product_suggestions()
 
     def hide_product_suggestions(self):
-        if self._product_popup is not None:
-            try:
-                self._product_popup.destroy()
-            except Exception:
-                pass
+        popup = self._product_popup
         self._product_popup = None
         self._product_popup_entry = None
         self._product_popup_items = []
+        if popup is not None:
+            try:
+                popup.destroy()
+            except Exception:
+                pass
 
-    def _product_popup_key(self, event, entry):
-        if self._product_popup is None or self._product_popup_entry is not entry:
-            return None
-        lb = self._product_popup.winfo_children()[0]
-        if event.keysym in ("Down", "Up"):
+    def _description_popup_navigation(self, event, entry):
+        if self._product_popup is not None and self._product_popup_entry is entry:
+            lb = self._product_popup.winfo_children()[0]
             cur = lb.curselection()
             idx = cur[0] if cur else 0
-            idx += 1 if event.keysym == "Down" else -1
-            idx = max(0, min(idx, lb.size() - 1))
+            if event.keysym == "Down":
+                idx = min(idx + 1, lb.size() - 1)
+            else:
+                idx = max(idx - 1, 0)
             lb.selection_clear(0, "end")
             lb.selection_set(idx)
             lb.activate(idx)
             return "break"
-        if event.keysym in ("Return", "KP_Enter"):
+        return self._move_table_arrow_focus(entry, -1 if event.keysym == "Up" else 1)
+
+    def _description_popup_return(self, event, entry):
+        if self._product_popup is not None and self._product_popup_entry is entry:
+            lb = self._product_popup.winfo_children()[0]
             cur = lb.curselection()
             if cur:
-                self._choose_product_suggestion(entry, cur[0])
-                return "break"
-        if event.keysym == "Escape":
+                return self._choose_product_suggestion(entry, cur[0])
+        return self.focus_next_or_cost(entry, 1, 3)
+
+    def _description_popup_escape(self, event):
+        if self._product_popup is not None:
             self.hide_product_suggestions()
             return "break"
         return None
@@ -2109,11 +2136,25 @@ class App:
                 row[1].set(product)
                 row[3].set(f"{float(cost or 0):g}")
                 break
+
+        # Destroy the popup first, then restore focus on the next idle cycle.
+        # This prevents the short UI freeze caused by a Toplevel focus transition.
         self.hide_product_suggestions()
-        entry.focus_set()
-        entry.icursor(tk.END)
+        try:
+            self.root.after_idle(lambda: self._restore_description_focus(entry))
+        except Exception:
+            entry.focus_set()
+            entry.icursor(tk.END)
         self.recalc()
         return "break"
+
+    def _restore_description_focus(self, entry):
+        try:
+            if entry.winfo_exists():
+                entry.focus_set()
+                entry.icursor(tk.END)
+        except Exception:
+            pass
 
     def edit_product_master(self, parent):
         win = tk.Toplevel(parent)
