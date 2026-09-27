@@ -357,13 +357,103 @@ def open_job_chit(app, db, get_pdf_dir, job_id=None):
                 else: subprocess.Popen(['xdg-open',path])
             except OSError: pass
     def print_click():
+        # Direct dot-matrix printing: do not depend on a PDF viewer's Windows
+        # "print"/"printto" shell association (which causes WinError 1155).
+        # The PDF is still generated normally; this button sends a clean 80-column
+        # text copy directly to the selected/default printer using RAW mode.
         path=make_pdf()
         if not path: return
         if not sys.platform.startswith('win'):
-            messagebox.showinfo('Print',f'Open the PDF and print it:\n{path}',parent=win); return
-        if messagebox.askyesno('Print Job Sheet','Send the job sheet to your DEFAULT Windows printer?',parent=win):
-            try: os.startfile(path,'print')
-            except OSError as e: messagebox.showerror('Printer',f'Printing failed: {e}\nPDF saved at {path}',parent=win)
+            messagebox.showinfo('Print',f'Open the job sheet PDF and print it:\n{path}',parent=win); return
+
+        try:
+            import win32print
+            printer_name = win32print.GetDefaultPrinter()
+            if not printer_name:
+                raise RuntimeError('No default Windows printer is configured.')
+
+            def wrap_line(value, width=78):
+                import textwrap
+                text = str(value or '')
+                if not text:
+                    return ['']
+                return textwrap.wrap(
+                    text, width=width, break_long_words=False,
+                    break_on_hyphens=False, replace_whitespace=False,
+                    drop_whitespace=True
+                ) or ['']
+
+            def add(lines, value=''):
+                lines.extend(wrap_line(value))
+
+            # Epson ESC/P formatting.  This is printer-side formatting, so it
+            # works even when no PDF application is associated with "Print".
+            ESC = b'\x1b'
+            data = bytearray()
+            data += ESC + b'@'          # initialize
+            data += ESC + b'M'          # 12 cpi
+            data += ESC + b'E'          # bold
+            data += ESC + b'W1'         # double width
+            data += ESC + b'w1'         # double height
+            data += b'BLUETECH COMPUTERS\r\n'
+            data += ESC + b'w0' + ESC + b'W0' + ESC + b'F'
+
+            lines=[]
+            add(lines, 'PC BUILD JOB SHEET | INTERNAL WORKSHOP COPY')
+            add(lines, '='*78)
+            add(lines, f'JOB NO       : {number}')
+            add(lines, f'QUOTATION    : {qno}')
+            add(lines, f'STATUS       : {status_var.get()}')
+            add(lines, f'CUSTOMER     : {customer}')
+            add(lines, f'PHONE        : {phone}')
+            add(lines, f'CREATED      : {created}')
+            add(lines, f'DUE DATE     : {due_var.get() or "-"}')
+            add(lines, '')
+            add(lines, 'BUILD COMPONENTS')
+            add(lines, '-'*78)
+            add(lines, f'{"#":<3}{"PRODUCT":<28}{"DESCRIPTION":<38}{"QTY":>5}')
+            add(lines, '-'*78)
+            for idx,(prod,desc,qty) in enumerate(items,1):
+                add(lines, f'{idx:<3}{str(prod)[:28]:<28}{str(desc or "-")[:38]:<38}{str(qty):>5}')
+            add(lines, '')
+            add(lines, 'STAFF / RESPONSIBILITY')
+            add(lines, '-'*78)
+            for stage in STAGES:
+                add(lines, f'{stage:<20} {staff_vars[stage].get().strip():<25} {time_vars[stage].get().strip()}')
+            add(lines, '')
+            add(lines, 'BUILD / FINAL CHECKLIST')
+            add(lines, '-'*78)
+            for item in CHECKS:
+                mark = '[X]' if check_vars[item].get() else '[ ]'
+                add(lines, f'{mark} {item}')
+            add(lines, '')
+            add(lines, 'REMARKS / SERIAL NUMBERS')
+            add(lines, '-'*78)
+            remarks_text = remarks.get('1.0','end-1c').strip() or '-'
+            for part in remarks_text.splitlines():
+                add(lines, part)
+            add(lines, '')
+            add(lines, 'Workshop signature: ____________________    Final approval: ____________________')
+
+            data += ('\r\n'.join(lines) + '\r\n\f').encode('cp437', errors='replace')
+
+            h=win32print.OpenPrinter(printer_name)
+            try:
+                win32print.StartDocPrinter(h,1,(number, None, 'RAW'))
+                win32print.StartPagePrinter(h)
+                win32print.WritePrinter(h, bytes(data))
+                win32print.EndPagePrinter(h)
+                win32print.EndDocPrinter(h)
+            finally:
+                win32print.ClosePrinter(h)
+
+            messagebox.showinfo('Printer', f'Job Sheet sent to {printer_name}.', parent=win)
+        except Exception as e:
+            messagebox.showerror(
+                'Printer',
+                f'Could not print the Job Sheet directly.\n\n{e}\n\nPDF saved at:\n{path}',
+                parent=win
+            )
     def close_window():
         try: win.grab_release()
         except tk.TclError: pass
