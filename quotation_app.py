@@ -702,15 +702,15 @@ class App:
             if j != 1:
                 self._bind_table_arrow_focus(e)
             if j == 1:
-                # Main product names are always shown in CAPITAL letters.
+                # PRODUCT is the category/type field. Stock autocomplete belongs to DESCRIPTION.
                 e.bind("<KeyRelease>", lambda event, var=p, widget=e: self._product_keyrelease(var, widget))
+            elif j == 2:
+                # DESCRIPTION is the actual stock/product name from the Excel master.
+                e.bind("<KeyRelease>", lambda event, var=d, widget=e: self._description_keyrelease(var, widget))
                 e.bind("<Up>", lambda event, widget=e: self._product_popup_key(event, widget) or self._move_table_arrow_focus(widget, -1), add="+")
                 e.bind("<Down>", lambda event, widget=e: self._product_popup_key(event, widget) or self._move_table_arrow_focus(widget, 1), add="+")
-                e.bind("<Return>", lambda event, widget=e: self._product_popup_key(event, widget) or "break", add="+")
+                e.bind("<Return>", lambda event, widget=e: self._product_popup_key(event, widget) or self.focus_next_or_cost(widget, 1, 3), add="+")
                 e.bind("<Escape>", lambda event: self.hide_product_suggestions(), add="+")
-            elif j == 2:
-                # DESCRIPTION is always shown in CAPITAL letters.
-                e.bind("<KeyRelease>", lambda event, var=d, widget=e: self._description_keyrelease(var, widget))
             elif j == 3:
                 # Quantity greater than 1 is visually emphasized.
                 e.bind("<KeyRelease>", lambda event, var=q, widget=e: self._qty_keyrelease(var, widget))
@@ -774,6 +774,11 @@ class App:
         if value != upper:
             var.set(upper)
             widget.icursor(tk.END)
+        matches = self._product_matches(upper)
+        if matches:
+            self._show_product_suggestions(widget, matches)
+        else:
+            self.hide_product_suggestions()
         self.recalc()
 
     def toggle_predeposit_cod(self):
@@ -2100,9 +2105,8 @@ class App:
         product, cost, description = self._product_popup_items[index]
         for row in self.rows:
             if entry in row[4]:
-                row[0].set(product)
-                if description:
-                    row[1].set(description)
+                # Autocomplete fills DESCRIPTION; PRODUCT remains the category field.
+                row[1].set(product)
                 row[3].set(f"{float(cost or 0):g}")
                 break
         self.hide_product_suggestions()
@@ -2110,6 +2114,78 @@ class App:
         entry.icursor(tk.END)
         self.recalc()
         return "break"
+
+    def edit_product_master(self, parent):
+        win = tk.Toplevel(parent)
+        win.title("Product Master - View / Edit")
+        win.geometry("900x600")
+        win.minsize(760, 480)
+        win.transient(parent)
+        win.grab_set()
+        outer = ttk.Frame(win, padding=10)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="PRODUCT MASTER / STOCK REPORT", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 6))
+        ttk.Label(outer, text="Double-click a row to edit NAME, COST PRICE or DESCRIPTION. Changes are saved to the local product master.", foreground=GREY).pack(anchor="w", pady=(0, 8))
+        frame = ttk.Frame(outer); frame.pack(fill="both", expand=True)
+        tree = ttk.Treeview(frame, columns=("product","cost","description"), show="headings", selectmode="browse")
+        tree.heading("product", text="NAME / PRODUCT"); tree.heading("cost", text="COST PRICE"); tree.heading("description", text="DESCRIPTION")
+        tree.column("product", width=390); tree.column("cost", width=140, anchor="e"); tree.column("description", width=300)
+        vsb=ttk.Scrollbar(frame, orient="vertical", command=tree.yview); tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True); vsb.pack(side="right", fill="y")
+        def refresh():
+            self.refresh_product_master(); tree.delete(*tree.get_children())
+            for product,cost,description in self.product_master:
+                tree.insert("", "end", values=(product, f"{float(cost or 0):g}", description or ""))
+        def edit_selected(_event=None):
+            sel=tree.selection()
+            if not sel: return
+            vals=tree.item(sel[0], "values"); old=str(vals[0])
+            ed=tk.Toplevel(win); ed.title("Edit Product Master Item"); ed.geometry("560x240"); ed.transient(win); ed.grab_set()
+            body=ttk.Frame(ed,padding=12); body.pack(fill="both",expand=True)
+            pv=tk.StringVar(value=old); cv=tk.StringVar(value=str(vals[1])); dv=tk.StringVar(value=str(vals[2]))
+            for r,(lab,var) in enumerate((("Product Name",pv),("Cost Price",cv),("Description",dv))):
+                ttk.Label(body,text=lab).grid(row=r,column=0,sticky="w",pady=5); ttk.Entry(body,textvariable=var,width=55).grid(row=r,column=1,sticky="ew",pady=5)
+            body.columnconfigure(1,weight=1)
+            def save():
+                product=pv.get().strip().upper()
+                if not product: messagebox.showwarning("Product Master","Product Name is required.",parent=ed); return
+                try: cost=float(cv.get().replace(",","").strip() or 0)
+                except ValueError: messagebox.showwarning("Product Master","Cost Price must be a number.",parent=ed); return
+                c=db()
+                try: c.execute("UPDATE product_master SET product=?,cost=?,description=? WHERE product=? COLLATE NOCASE",(product,cost,dv.get().strip().upper(),old)); c.commit()
+                except sqlite3.IntegrityError: c.close(); messagebox.showwarning("Product Master","That Product Name already exists.",parent=ed); return
+                c.close(); self.refresh_product_master(); refresh(); ed.destroy()
+            ttk.Button(body,text="SAVE",style="Blue.TButton",command=save).grid(row=3,column=1,sticky="e",pady=(12,0)); ed.bind("<Return>",lambda e:save()); ed.bind("<Escape>",lambda e:ed.destroy()); ed.focus_force()
+        def add_item():
+            ed=tk.Toplevel(win); ed.title("Add Product Master Item"); ed.geometry("560x240"); ed.transient(win); ed.grab_set()
+            body=ttk.Frame(ed,padding=12); body.pack(fill="both",expand=True); pv=tk.StringVar(); cv=tk.StringVar(value="0"); dv=tk.StringVar()
+            for r,(lab,var) in enumerate((("Product Name",pv),("Cost Price",cv),("Description",dv))):
+                ttk.Label(body,text=lab).grid(row=r,column=0,sticky="w",pady=5); ttk.Entry(body,textvariable=var,width=55).grid(row=r,column=1,sticky="ew",pady=5)
+            body.columnconfigure(1,weight=1)
+            def save():
+                product=pv.get().strip().upper()
+                if not product: messagebox.showwarning("Product Master","Product Name is required.",parent=ed); return
+                try: cost=float(cv.get().replace(",","").strip() or 0)
+                except ValueError: messagebox.showwarning("Product Master","Cost Price must be a number.",parent=ed); return
+                c=db()
+                try: c.execute("INSERT INTO product_master(product,cost,description) VALUES(?,?,?)",(product,cost,dv.get().strip().upper())); c.commit()
+                except sqlite3.IntegrityError: c.close(); messagebox.showwarning("Product Master","That Product Name already exists.",parent=ed); return
+                c.close(); self.refresh_product_master(); refresh(); ed.destroy()
+            ttk.Button(body,text="ADD",style="Blue.TButton",command=save).grid(row=3,column=1,sticky="e",pady=(12,0)); ed.bind("<Return>",lambda e:save()); ed.bind("<Escape>",lambda e:ed.destroy()); ed.focus_force()
+        def delete_selected():
+            sel=tree.selection()
+            if not sel: messagebox.showwarning("Product Master","Select a product first.",parent=win); return
+            product=str(tree.item(sel[0],"values")[0])
+            if not messagebox.askyesno("Product Master",f"Delete this product?\n\n{product}",parent=win): return
+            c=db(); c.execute("DELETE FROM product_master WHERE product=? COLLATE NOCASE",(product,)); c.commit(); c.close(); self.refresh_product_master(); refresh()
+        tree.bind("<Double-1>",edit_selected)
+        btns=ttk.Frame(outer); btns.pack(fill="x",pady=(8,0))
+        ttk.Button(btns,text="ADD PRODUCT",style="Blue.TButton",command=add_item).pack(side="left",padx=(0,6))
+        ttk.Button(btns,text="EDIT SELECTED",command=edit_selected).pack(side="left",padx=6)
+        ttk.Button(btns,text="DELETE SELECTED",command=delete_selected).pack(side="left",padx=6)
+        ttk.Button(btns,text="REFRESH",command=refresh).pack(side="left",padx=6)
+        ttk.Button(btns,text="CLOSE",command=win.destroy).pack(side="right")
+        refresh(); win.focus_force()
 
     def settings(self):
         win = tk.Toplevel(self.root)
@@ -2188,8 +2264,10 @@ class App:
                    command=lambda: self.import_product_excel(win, product_status)).pack(side="left", padx=(0, 6))
         ttk.Button(pm_row, text="CLEAR PRODUCT MASTER",
                    command=lambda: self.clear_product_master(win, product_status)).pack(side="left")
+        ttk.Button(pm_row, text="VIEW / EDIT PRODUCT MASTER", style="Blue.TButton",
+                   command=lambda: self.edit_product_master(win)).pack(side="left", padx=(6, 0))
         ttk.Label(body, textvariable=product_status, foreground=GREY).pack(anchor="w", pady=(6, 2))
-        ttk.Label(body, text="Uses NAME as Product and COST PRICE as the default Cost. Product suggestions are optional; manual products are still allowed.",
+        ttk.Label(body, text="Uses NAME as the stock product suggestion and COST PRICE as the default Cost. Suggestions appear in DESCRIPTION; manual descriptions are still allowed.",
                   foreground=GREY, wraplength=820).pack(anchor="w", pady=(0, 4))
 
         ttk.Separator(body).pack(fill="x", pady=10)
