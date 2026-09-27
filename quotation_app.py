@@ -9,6 +9,11 @@ from urllib.parse import quote
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
+
+try:
+    import openpyxl
+except Exception:
+    openpyxl = None
 import tkinter.font as tkfont
 
 try:
@@ -114,6 +119,10 @@ def db():
         c.execute("ALTER TABLE items ADD COLUMN cost REAL DEFAULT 0")
     c.execute("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, active INTEGER DEFAULT 1)")
+    c.execute("""CREATE TABLE IF NOT EXISTS product_master(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, product TEXT UNIQUE COLLATE NOCASE,
+        cost REAL DEFAULT 0, description TEXT DEFAULT ''
+    )""")
     c.execute("""CREATE TABLE IF NOT EXISTS invoices(
         id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_no TEXT UNIQUE, quotation_no TEXT,
         customer TEXT, phone TEXT, date TEXT, total REAL DEFAULT 0, created_at TEXT
@@ -248,6 +257,11 @@ class App:
         self.rows = []
         self.editing_id = None
         setup_db(db)
+        self.product_master = []
+        self.refresh_product_master()
+        self._product_popup = None
+        self._product_popup_entry = None
+        self._product_popup_items = []
         self.build()
 
     def build(self):
@@ -684,10 +698,16 @@ class App:
                          highlightcolor="#0878D1")
             e.grid(row=r + 1, column=j, padx=2, pady=2, sticky="ew", ipady=3)
             widgets.append(e)
-            self._bind_table_arrow_focus(e)
+            if j != 1:
+                self._bind_table_arrow_focus(e)
             if j == 1:
                 # Main product names are always shown in CAPITAL letters.
                 e.bind("<KeyRelease>", lambda event, var=p, widget=e: self._product_keyrelease(var, widget))
+                e.bind("<Up>", lambda event, widget=e: self._product_popup_key(event, widget) or self._move_table_arrow_focus(widget, -1), add="+")
+                e.bind("<Down>", lambda event, widget=e: self._product_popup_key(event, widget) or self._move_table_arrow_focus(widget, 1), add="+")
+                e.bind("<Return>", lambda event, widget=e: self._product_popup_key(event, widget) or "break", add="+")
+                e.bind("<Escape>", lambda event: self.hide_product_suggestions(), add="+")
+                e.bind("<FocusOut>", lambda event: self.root.after(150, self.hide_product_suggestions))
             elif j == 2:
                 # DESCRIPTION is always shown in CAPITAL letters.
                 e.bind("<KeyRelease>", lambda event, var=d, widget=e: self._description_keyrelease(var, widget))
@@ -733,6 +753,11 @@ class App:
             var.set(upper)
             widget.icursor(tk.END)
         widget.configure(font=("Segoe UI", 9, "bold"))
+        matches = self._product_matches(upper)
+        if matches:
+            self._show_product_suggestions(widget, matches)
+        else:
+            self.hide_product_suggestions()
         self.recalc()
 
     def _qty_keyrelease(self, var, widget):
@@ -1863,6 +1888,202 @@ class App:
         except Exception as e:
             messagebox.showerror("WhatsApp", f"Could not open WhatsApp:\n{e}")
 
+    def refresh_product_master(self):
+        c = db()
+        self.product_master = c.execute(
+            "SELECT product, cost, description FROM product_master ORDER BY product COLLATE NOCASE"
+        ).fetchall()
+        c.close()
+
+    def import_product_excel(self, parent, status_var):
+        if openpyxl is None:
+            messagebox.showerror(
+                "Product Master",
+                "Excel support is not installed. Please install openpyxl.",
+                parent=parent
+            )
+            return
+        path = filedialog.askopenfilename(
+            title="Select Stock Report Excel",
+            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")],
+            parent=parent
+        )
+        if not path:
+            return
+        try:
+            wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+            ws = wb.active
+            rows = ws.iter_rows(values_only=True)
+            header = next(rows, None)
+            if not header:
+                raise ValueError("The Excel file is empty.")
+
+            headers = {str(v).strip().upper(): i for i, v in enumerate(header) if v is not None}
+            name_idx = headers.get("NAME")
+            cost_idx = headers.get("COST PRICE")
+            desc_idx = headers.get("DESCRIPTION")
+            if name_idx is None:
+                raise ValueError("The Excel file must contain a 'NAME' column.")
+            if cost_idx is None:
+                raise ValueError("The Excel file must contain a 'COST PRICE' column.")
+
+            imported = 0
+            skipped = 0
+            c = db()
+            for row in rows:
+                if not row or name_idx >= len(row):
+                    skipped += 1
+                    continue
+                name = str(row[name_idx] or "").strip().upper()
+                if not name:
+                    skipped += 1
+                    continue
+                raw_cost = row[cost_idx] if cost_idx < len(row) else 0
+                try:
+                    if isinstance(raw_cost, (int, float)):
+                        cost = float(raw_cost)
+                    else:
+                        cost = float(str(raw_cost or "0").replace(",", "").replace("Rs.", "").replace("LKR", "").strip() or 0)
+                except Exception:
+                    cost = 0.0
+                description = ""
+                if desc_idx is not None and desc_idx < len(row):
+                    description = str(row[desc_idx] or "").strip().upper()
+                c.execute(
+                    """INSERT INTO product_master(product,cost,description) VALUES(?,?,?)
+                       ON CONFLICT(product) DO UPDATE SET cost=excluded.cost, description=excluded.description""",
+                    (name, cost, description)
+                )
+                imported += 1
+            c.commit()
+            c.close()
+            wb.close()
+            self.refresh_product_master()
+            status_var.set(f"Loaded {len(self.product_master):,} products from {os.path.basename(path)}")
+            messagebox.showinfo(
+                "Product Master",
+                f"Product master updated successfully.\n\nProducts available: {len(self.product_master):,}",
+                parent=parent
+            )
+        except Exception as e:
+            try:
+                wb.close()
+            except Exception:
+                pass
+            messagebox.showerror("Product Master", f"Could not import Excel:\n{e}", parent=parent)
+
+    def clear_product_master(self, parent, status_var):
+        if not self.product_master:
+            status_var.set("No product master loaded.")
+            return
+        if not messagebox.askyesno(
+            "Product Master", "Clear all imported products and cost prices?", parent=parent
+        ):
+            return
+        c = db()
+        c.execute("DELETE FROM product_master")
+        c.commit()
+        c.close()
+        self.refresh_product_master()
+        self.hide_product_suggestions()
+        status_var.set("Product master cleared.")
+
+    def _product_matches(self, text):
+        term = str(text or "").strip().upper()
+        if not term:
+            return []
+        starts = []
+        contains = []
+        for product, cost, description in self.product_master:
+            p = str(product or "")
+            if p.startswith(term):
+                starts.append((p, cost, description))
+            elif term in p:
+                contains.append((p, cost, description))
+        return (starts + contains)[:12]
+
+    def _show_product_suggestions(self, entry, matches):
+        self.hide_product_suggestions()
+        if not matches:
+            return
+        self._product_popup_entry = entry
+        self._product_popup_items = matches
+        popup = tk.Toplevel(self.root)
+        self._product_popup = popup
+        popup.overrideredirect(True)
+        popup.transient(self.root)
+        popup.configure(bg="#B9D7EF")
+        x = entry.winfo_rootx()
+        y = entry.winfo_rooty() + entry.winfo_height()
+        width = max(entry.winfo_width(), 360)
+        popup.geometry(f"{width}x{min(300, 28 * len(matches) + 4)}+{x}+{y}")
+        lb = tk.Listbox(
+            popup, activestyle="none", selectmode="browse", height=min(10, len(matches)),
+            font=("Segoe UI", 9), bg="#FFFFFF", fg="#17324D",
+            selectbackground="#0878D1", selectforeground="#FFFFFF",
+            relief="solid", bd=1, highlightthickness=0
+        )
+        lb.pack(fill="both", expand=True, padx=1, pady=1)
+        for product, cost, _ in matches:
+            lb.insert("end", f"{product}    |    Cost: LKR {float(cost or 0):,.2f}")
+        lb.selection_set(0)
+        lb.activate(0)
+        lb.bind("<ButtonRelease-1>", lambda e: self._choose_product_suggestion(entry, lb.curselection()[0] if lb.curselection() else 0))
+        lb.bind("<Return>", lambda e: self._choose_product_suggestion(entry, lb.curselection()[0] if lb.curselection() else 0))
+        lb.bind("<Escape>", lambda e: self.hide_product_suggestions())
+        popup.bind("<Escape>", lambda e: self.hide_product_suggestions())
+
+    def hide_product_suggestions(self):
+        if self._product_popup is not None:
+            try:
+                self._product_popup.destroy()
+            except Exception:
+                pass
+        self._product_popup = None
+        self._product_popup_entry = None
+        self._product_popup_items = []
+
+    def _product_popup_key(self, event, entry):
+        if self._product_popup is None or self._product_popup_entry is not entry:
+            return None
+        lb = self._product_popup.winfo_children()[0]
+        if event.keysym in ("Down", "Up"):
+            cur = lb.curselection()
+            idx = cur[0] if cur else 0
+            idx += 1 if event.keysym == "Down" else -1
+            idx = max(0, min(idx, lb.size() - 1))
+            lb.selection_clear(0, "end")
+            lb.selection_set(idx)
+            lb.activate(idx)
+            return "break"
+        if event.keysym in ("Return", "KP_Enter"):
+            cur = lb.curselection()
+            if cur:
+                self._choose_product_suggestion(entry, cur[0])
+                return "break"
+        if event.keysym == "Escape":
+            self.hide_product_suggestions()
+            return "break"
+        return None
+
+    def _choose_product_suggestion(self, entry, index):
+        if self._product_popup_entry is not entry or not self._product_popup_items:
+            return "break"
+        index = max(0, min(index, len(self._product_popup_items) - 1))
+        product, cost, description = self._product_popup_items[index]
+        for row in self.rows:
+            if entry in row[4]:
+                row[0].set(product)
+                if description:
+                    row[1].set(description)
+                row[3].set(f"{float(cost or 0):g}")
+                break
+        self.hide_product_suggestions()
+        entry.focus_set()
+        entry.icursor(tk.END)
+        self.recalc()
+        return "break"
+
     def settings(self):
         win = tk.Toplevel(self.root)
         win.title("Settings")
@@ -1931,6 +2152,18 @@ class App:
         ub=ttk.Frame(body); ub.pack(pady=6)
         ttk.Button(ub,text="ADD USER",command=add_user).pack(side="left",padx=4)
         ttk.Button(ub,text="DELETE USER",command=delete_user).pack(side="left",padx=4)
+
+        ttk.Separator(body).pack(fill="x", pady=10)
+        ttk.Label(body, text="PRODUCT MASTER / STOCK REPORT", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(2, 8))
+        product_status = tk.StringVar(value=f"Products loaded: {len(self.product_master):,}")
+        pm_row = ttk.Frame(body); pm_row.pack(fill="x")
+        ttk.Button(pm_row, text="IMPORT STOCK REPORT EXCEL", style="Blue.TButton",
+                   command=lambda: self.import_product_excel(win, product_status)).pack(side="left", padx=(0, 6))
+        ttk.Button(pm_row, text="CLEAR PRODUCT MASTER",
+                   command=lambda: self.clear_product_master(win, product_status)).pack(side="left")
+        ttk.Label(body, textvariable=product_status, foreground=GREY).pack(anchor="w", pady=(6, 2))
+        ttk.Label(body, text="Uses NAME as Product and COST PRICE as the default Cost. Product suggestions are optional; manual products are still allowed.",
+                  foreground=GREY, wraplength=820).pack(anchor="w", pady=(0, 4))
 
         ttk.Separator(body).pack(fill="x", pady=10)
         ttk.Label(body, text="COD Settings", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(2,8))
