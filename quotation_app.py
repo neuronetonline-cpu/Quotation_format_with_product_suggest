@@ -3,6 +3,7 @@ import sqlite3
 import subprocess
 import sys
 import webbrowser
+import textwrap
 from job_chit import open_job_chit, show_job_history, setup_db
 from datetime import datetime
 from urllib.parse import quote
@@ -1828,7 +1829,24 @@ class App:
             ttk.Combobox(pw,textvariable=pv,values=printers,state="readonly",width=58).pack(padx=15,fill="x")
             def do_print():
                 lines=[]
-                def line(s=""): lines.append(str(s)[:95])
+                # Dot-matrix RAW printing: keep every line inside the printable
+                # 80-column width instead of allowing long warranty text to wrap
+                # unpredictably at the printer.
+                RAW_WIDTH = 78
+                def line(s=""):
+                    text = str(s)
+                    if not text:
+                        lines.append("")
+                        return
+                    wrapped = textwrap.wrap(
+                        text,
+                        width=RAW_WIDTH,
+                        break_long_words=False,
+                        break_on_hyphens=False,
+                        replace_whitespace=False,
+                        drop_whitespace=True,
+                    )
+                    lines.extend(wrapped or [""])
                 line("BLUETECH COMPUTERS"); line("COMPUTER SALES | REPAIRS | UPGRADES")
                 line("230, 1st Floor, Lakyanya Plaza, Highlevel Road, Maharagama"); line("077 633 7942 / 074 394 6233"); line("="*80)
                 line(f"INVOICE NO : {invoice_no.get()}    DATE : {invoice_date.get()}"); line(f"SOLD BY    : {self.prepared_by.get()}"); line(""); line(f"CUSTOMER   : {customer.get()[:65]}") ; line(f"PHONE      : {phone.get()[:65]}")
